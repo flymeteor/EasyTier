@@ -1,65 +1,73 @@
-name: EasyTier Core (x86 Only)
+name: EasyTier Core (Linux x86_64 Only)
 
 on:
   push:
-    branches: ["develop", "main", "releases/**"]
-  workflow_dispatch: # 允许你手动点击按钮触发编译
+    branches: ["main", "develop"]
+  workflow_dispatch: # 支持手动点击运行
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # 只保留 Linux x86_64 (使用 musl 实现静态链接，兼容性最好)
-          - TARGET: x86_64-unknown-linux-musl
-            OS: ubuntu-22.04
-            ARTIFACT_NAME: linux-x86_64
-          # 如果需要 Windows 版本可以保留下面这行，不需要则删掉
-          - TARGET: x86_64-pc-windows-msvc
-            OS: windows-latest
-            ARTIFACT_NAME: windows-x86_64
-
-    runs-on: ${{ matrix.OS }}
+  # 第一阶段：编译前端网页
+  build_web:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      # 安装必要的 Protobuf 环境 (EasyTier 强依赖)
-      - name: Setup protoc
-        uses: arduino/setup-protoc@v3
+      - uses: actions/setup-node@v4
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # 缓存 Rust 依赖，加速后续编译
-      - uses: Swatinem/rust-cache@v2
+          node-version: 22
+      - uses: pnpm/action-setup@v4
         with:
-          shared-key: "x86-core-cache"
-
-      # 安装 Rust 工具链
-      - name: Install Rust
+          version: 10
+      - name: Build Dashboard
         run: |
-          rustup target add ${{ matrix.TARGET }}
-
-      # 编译核心程序
-      - name: Build Core
-        shell: bash
-        run: |
-          # 如果是 Linux，可能需要安装 musl 工具链和编译器依赖
-          if [[ "${{ matrix.OS }}" == "ubuntu-22.04" ]]; then
-            sudo apt-get update && sudo apt-get install -y musl-tools clang libclang-dev
-          fi
-          
-          # 执行编译 (开启 mimalloc 优化，跳过 Web 嵌入以进一步提速)
-          cargo build --release --target ${{ matrix.TARGET }} --features=mimalloc
-
-      # 整理并上传产物
-      - name: Archive artifact
+          pnpm -r install
+          pnpm -r --filter "./easytier-web/*" build
+      - name: Upload Web Dist
         uses: actions/upload-artifact@v4
         with:
-          name: easytier-${{ matrix.ARTIFACT_NAME }}
+          name: web-dist
+          path: easytier-web/frontend/dist/*
+
+  # 第二阶段：编译 Rust 程序
+  build_linux:
+    needs: build_web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      # 下载刚才编译好的前端网页
+      - name: Download web dist
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: easytier-web/frontend/dist/
+
+      # 安装基础编译环境
+      - name: Setup environment
+        run: |
+          sudo apt update && sudo apt install -y musl-tools protobuf-compiler libprotobuf-dev clang libclang-dev
+
+      - name: Setup Rust
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      # 正式编译
+      - name: Build EasyTier
+        run: |
+          # 编译带网页嵌入的版本
+          cargo build --release --target x86_64-unknown-linux-musl --package=easytier-web --features=embed
+          # 编译核心程序 (使用 jemalloc)
+          cargo build --release --target x86_64-unknown-linux-musl --package=easytier --features=jemalloc
+
+      # 上传最终的二进制文件
+      - name: Archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: easytier-linux-x86_64
           path: |
-            target/${{ matrix.TARGET }}/release/easytier-core*
-            target/${{ matrix.TARGET }}/release/easytier-cli*
+            target/x86_64-unknown-linux-musl/release/easytier-core
+            target/x86_64-unknown-linux-musl/release/easytier-cli
