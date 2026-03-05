@@ -1,0 +1,65 @@
+name: EasyTier Core (x86 Only)
+
+on:
+  push:
+    branches: ["develop", "main", "releases/**"]
+  workflow_dispatch: # 允许你手动点击按钮触发编译
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 只保留 Linux x86_64 (使用 musl 实现静态链接，兼容性最好)
+          - TARGET: x86_64-unknown-linux-musl
+            OS: ubuntu-22.04
+            ARTIFACT_NAME: linux-x86_64
+          # 如果需要 Windows 版本可以保留下面这行，不需要则删掉
+          - TARGET: x86_64-pc-windows-msvc
+            OS: windows-latest
+            ARTIFACT_NAME: windows-x86_64
+
+    runs-on: ${{ matrix.OS }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # 安装必要的 Protobuf 环境 (EasyTier 强依赖)
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # 缓存 Rust 依赖，加速后续编译
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "x86-core-cache"
+
+      # 安装 Rust 工具链
+      - name: Install Rust
+        run: |
+          rustup target add ${{ matrix.TARGET }}
+
+      # 编译核心程序
+      - name: Build Core
+        shell: bash
+        run: |
+          # 如果是 Linux，可能需要安装 musl 工具链和编译器依赖
+          if [[ "${{ matrix.OS }}" == "ubuntu-22.04" ]]; then
+            sudo apt-get update && sudo apt-get install -y musl-tools clang libclang-dev
+          fi
+          
+          # 执行编译 (开启 mimalloc 优化，跳过 Web 嵌入以进一步提速)
+          cargo build --release --target ${{ matrix.TARGET }} --features=mimalloc
+
+      # 整理并上传产物
+      - name: Archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: easytier-${{ matrix.ARTIFACT_NAME }}
+          path: |
+            target/${{ matrix.TARGET }}/release/easytier-core*
+            target/${{ matrix.TARGET }}/release/easytier-cli*
